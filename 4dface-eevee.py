@@ -1,6 +1,6 @@
 import copy
 import time
-from multiprocessing import Event, Process, Queue, freeze_support, queues
+from multiprocessing import Event, Process, Queue, freeze_support, queues, sharedctypes
 
 import numpy as np
 from imutils import face_utils
@@ -49,6 +49,8 @@ class Dlib_detector_process(Process):
             except queues.Full:
                 pass
 
+        self.in_queue.cancel_join_thread()
+        self.out_queue.cancel_join_thread()
         print('Dlib exiting')
         return 0
 
@@ -124,6 +126,8 @@ class Eos_process(Process):
             except queues.Full:
                 pass
 
+        self.in_queue.cancel_join_thread()
+        self.out_queue.cancel_join_thread()
         print('Eos exiting')
         return 0
 
@@ -168,6 +172,8 @@ class Matplotlib_process(Process):
             except queues.Full:
                 pass
 
+        self.in_queue.cancel_join_thread()
+        self.out_queue.cancel_join_thread()
         print('matplotlib exiting')
         return 0
 
@@ -292,9 +298,7 @@ if __name__ == "__main__":
             clear_queue(queue)
         face_detector_process.join()
         print('dlib joined')
-        eos_process.terminate()
         eos_process.join()
         print('eos joined')
-        matplotlib_process.terminate()
         matplotlib_process.join()
         print('all process joined')
