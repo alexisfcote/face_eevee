@@ -1,6 +1,8 @@
+import abc
 import copy
+import logging
 import time
-from multiprocessing import Event, Process, Queue, freeze_support, queues, sharedctypes
+from multiprocessing import Event, Process, Queue, freeze_support, queues
 
 import numpy as np
 from imutils import face_utils
@@ -11,8 +13,58 @@ import cv2
 import dlib
 import eos
 
+from .config import p, share_path
 
-class Dlib_detector_process(Process):
+
+
+
+class BaseProcess(Process, abc.ABC):
+    def __init__(self, exit_event, in_queue, out_queue):
+        super().__init__()
+        self.exit = exit_event
+        self.in_queue = in_queue
+        self.out_queue = out_queue
+        self.daemon = True
+        self.name = 'Unimplemented Name'
+
+    def prepare_run(self):
+        """Implement this function if there are some initialisation steps before the run method start processing inputs
+        
+        Returns:
+            bool -- Success of the preparation
+        """
+        return True
+
+    @abc.abstractmethod
+    def process_input(self, input_val):
+        """Process its inputs and returns the processed value
+
+        Arguments:
+            input_val {object} -- input value
+
+        Returns:
+            object -- processed output
+        """
+        return None
+
+    def run(self):
+        self.prepare_run()
+        while not self.exit.is_set():
+            try:
+                input_val = self.in_queue.get(block=True, timeout=1)
+                output_val = self.process_input(input_val)
+                self.out_queue.put_nowait(output_val)
+            except queues.Empty:
+                pass
+            except queues.Full:
+                pass
+        
+        self.in_queue.cancel_join_thread()
+        self.out_queue.cancel_join_thread()
+        logging.debug('{} exiting'.format(self.name))
+
+
+class Dlib_detector_process(BaseProcess):
     def __init__(self, exit_event, in_queue, out_queue, p):
         """Face detector process, that use dlib to predicts faces shape
 
@@ -21,53 +73,22 @@ class Dlib_detector_process(Process):
             out_queue {multiprocessing.Queue} -- Size 1 queue to put ressults in
             p {string} -- path to the dlib model
         """
-        super().__init__()
-        self.in_queue = in_queue
-        self.out_queue = out_queue
-        self.daemon = True
-        self.exit = exit_event
-
+        super().__init__(exit_event, in_queue, out_queue)
         self.detector = dlib.get_frontal_face_detector()
         self.predictor = dlib.shape_predictor(p)
 
-    def run(self):
-        while not self.exit.is_set():
-            try:
-                gray = self.in_queue.get(block=True, timeout=1)
-
-                rects = self.detector(gray, 0)
-                shapes = []
-                for rect in rects:
-                    # Make the prediction and transfom it to numpy array
-                    shape = self.predictor(gray, rect)
-                    shape = face_utils.shape_to_np(shape)
-                    shapes.append(shape)
-
-                self.out_queue.put_nowait(shapes)
-            except queues.Empty:
-                pass
-            except queues.Full:
-                pass
-
-        self.in_queue.cancel_join_thread()
-        self.out_queue.cancel_join_thread()
-        print('Dlib exiting')
-        return 0
-
-    def stop(self):
-        self.exit.set()
+    def process_input(self, gray):
+        rects = self.detector(gray, 0)
+        shapes = []
+        for rect in rects:
+            # Make the prediction and transfom it to numpy array
+            shape = self.predictor(gray, rect)
+            shape = face_utils.shape_to_np(shape)
+            shapes.append(shape)
+        return shapes
 
 
-def clear_queue(queue):
-    try:
-        while True:
-            queue.get_nowait()
-    except queues.Empty:
-        pass
-    queue.close()
-
-
-class Eos_process(Process):
+class Eos_process(BaseProcess):
     def __init__(self, exit_event, in_queue, out_queue, share_path, image_width, image_height):
         """eos lib process, that use eos to fit 3d faces to the landmarks
 
@@ -76,18 +97,12 @@ class Eos_process(Process):
             out_queue {multiprocessing.Queue} -- Size 1 queue to put ressults in
             share_path {string} -- path to the folder of eos models
         """
-        super().__init__()
-        self.in_queue = in_queue
-        self.out_queue = out_queue
+        super().__init__(exit_event, in_queue, out_queue)
         self.share_path = share_path
         self.image_width = image_width
         self.image_height = image_height
 
-        self.daemon = True
-        self.exit = exit_event
-
-    def run(self):
-
+    def prepare_run(self):
         self.model = eos.morphablemodel.load_model(
             self.share_path + "/sfm_shape_3448.bin")
         self.blendshapes = eos.morphablemodel.load_blendshapes(
@@ -107,35 +122,20 @@ class Eos_process(Process):
         self.model_contour = eos.fitting.ModelContour.load(
             self.share_path + '/sfm_model_contours.json')
 
-        while not self.exit.is_set():
-            try:
-                shapes = self.in_queue.get(block=True, timeout=1)
-                for shape in shapes:
-                    my_landmarks = [eos.core.Landmark(
-                        str(idx), xy) for idx, xy in enumerate(shape)]
+    def process_input(self, shapes):
+            for shape in shapes:
+                my_landmarks = [eos.core.Landmark(
+                    str(idx), xy) for idx, xy in enumerate(shape)]
 
-                    (mesh, pose, shape_coeffs, blendshape_coeffs) = eos.fitting.fit_shape_and_pose(self.morphablemodel_with_expressions,
-                                                                                                   my_landmarks, self.landmark_mapper, self.image_width, self.image_height,
-                                                                                                   self.edge_topology, self.contour_landmarks, self.model_contour)
+                (mesh, pose, shape_coeffs, blendshape_coeffs) = eos.fitting.fit_shape_and_pose(self.morphablemodel_with_expressions,
+                                                                                                my_landmarks, self.landmark_mapper, self.image_width, self.image_height,
+                                                                                                self.edge_topology, self.contour_landmarks, self.model_contour)
 
-                    np_mesh = np.vstack(mesh.vertices)
-
-                    self.out_queue.put_nowait(np_mesh)
-            except queues.Empty:
-                pass
-            except queues.Full:
-                pass
-
-        self.in_queue.cancel_join_thread()
-        self.out_queue.cancel_join_thread()
-        print('Eos exiting')
-        return 0
-
-    def stop(self):
-        self.exit.set()
+                return np.vstack(mesh.vertices)
 
 
-class Matplotlib_process(Process):
+
+class Matplotlib_process(BaseProcess):
     def __init__(self, exit_event, in_queue, out_queue):
         """Matplotlib process, that use matplotlib to plot vertexs
 
@@ -143,48 +143,27 @@ class Matplotlib_process(Process):
             in_queue {multiprocessing.Queue} -- Size 1 queue that accepts mesh
             out_queue {multiprocessing.Queue} -- Size 1 queue to put ressults in
         """
-        super().__init__()
-        self.in_queue = in_queue
-        self.out_queue = out_queue
-        self.daemon = True
-        self.exit = exit_event
+        super().__init__(exit_event, in_queue, out_queue)
 
-    def run(self):
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.view_init(15, 135)
-        while not self.exit.is_set():
-            try:
-                np_mesh = self.in_queue.get(block=True, timeout=1)
+    def prepare_run(self):
+        self.fig = plt.figure()
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.ax.view_init(15, 135)
+    
+    def process_input(self, np_mesh):
+        self.ax.scatter(np_mesh[:, 0], np_mesh[:, 2], np_mesh[:, 1], s=1)
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        self.ax.set_zticks([])
+        self.fig.canvas.draw()
 
-                ax.scatter(np_mesh[:, 0], np_mesh[:, 2], np_mesh[:, 1], s=1)
-                ax.set_xticks([])
-                ax.set_yticks([])
-                ax.set_zticks([])
-                fig.canvas.draw()
-
-                X = np.array(fig.canvas.renderer._renderer)
-                ax.clear()
-
-                self.out_queue.put_nowait(X)
-            except queues.Empty:
-                pass
-            except queues.Full:
-                pass
-
-        self.in_queue.cancel_join_thread()
-        self.out_queue.cancel_join_thread()
-        print('matplotlib exiting')
-        return 0
-
-    def stop(self):
-        self.exit.set()
+        X = np.array(self.fig.canvas.renderer._renderer)
+        self.ax.clear()
+        return X
 
 
 if __name__ == "__main__":
-    freeze_support
-    share_path = r"C:\4dface\eos\share"
-    p = r"C:\4dface\shape_predictor_68_face_landmarks.dat"
+    freeze_support()
 
     first = True
     render_vertex = True
@@ -293,9 +272,7 @@ if __name__ == "__main__":
         cap.release()
         exit_event.set()
         print('exit_event set')
-        for queue in [dlib_in_queue, dlib_out_queue, eos_in_queue,
-                      eos_out_queue, matplotlib_in_queue, matplotlib_out_queue, ]:
-            clear_queue(queue)
+        
         face_detector_process.join()
         print('dlib joined')
         eos_process.join()
