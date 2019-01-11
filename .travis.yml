@@ -1,7 +1,6 @@
 # Config file for automatic testing at travis-ci.org
 os: 
   - windows
-  - linux
 
 language: python
 python:

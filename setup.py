@@ -31,12 +31,20 @@ setup(
 
     install_requires=['imutils', 'numpy', 'opencv-python', 'eos-py', 'dlib', 'matplotlib'] ,
 
+    entry_points={
+        'console_scripts': [
+            'face_eevee = face_eevee.face_eevee:main',
+        ]
+    },
+
     classifiers=[
         'Development Status :: 2 - Pre-Alpha',
         'License :: OSI Approved :: MIT License',
+        'Operating System :: Microsoft :: Windows',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
+        'Topic :: Scientific/Engineering :: Image Recognition',
     ],
 )

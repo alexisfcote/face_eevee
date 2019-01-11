@@ -5,6 +5,9 @@ Face EEVEE
     :target: https://pypi.python.org/pypi/face_eevee
     :alt: Latest PyPI version
 
+.. image:: https://travis-ci.com/alexisfcote/face_eevee.svg?branch=master
+    :target: https://travis-ci.com/alexisfcote/face_eevee
+    :alt: Latest Travis-ci build
 
 Early test of eos lib for the EEVEE plateform
 

@@ -161,24 +161,34 @@ class Matplotlib_process(BaseProcess):
         self.ax.clear()
         return X
 
+def clear_queue(queue):
+    try:
+        while True:
+            queue.get_nowait()
+    except queues.Empty:
+        pass
+    queue.close()
 
-if __name__ == "__main__":
-    freeze_support()
-
+def main():
     first = True
-    render_vertex = True
 
-    X = np.zeros((2, 2, 3))
+    # initialise placeholders
+    rendered_mesh = np.zeros((0, 2, 3))
     shapes = []
-    np_mesh = []
+    np_mesh = None #np.zeros((1,3))
 
+    # Get first image to set image size
     cap = cv2.VideoCapture(0)
     _, image = cap.read()
     image_width = image.shape[1]
     image_height = image.shape[0]
 
+
+    # Setup interprocess communication
+    # exit_event is shared across all process
     exit_event = Event()
 
+    # Setup de queues for interprocess comm
     dlib_in_queue, dlib_out_queue = Queue(maxsize=1), Queue(maxsize=1)
     face_detector_process = Dlib_detector_process(
         exit_event, dlib_in_queue, dlib_out_queue, p)
@@ -195,6 +205,7 @@ if __name__ == "__main__":
         exit_event, matplotlib_in_queue, matplotlib_out_queue)
     matplotlib_process.start()
 
+    # setup counters
     frame_count = 0
     last_time = time.time()
 
@@ -210,57 +221,64 @@ if __name__ == "__main__":
             # Converting the image to gray scale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
+            # Feed the gray scale image to dlib for face detection
             try:
                 dlib_in_queue.put_nowait(gray)
             except queues.Full:
                 pass
 
+            # Get back the landmarks (skip if not ready, same for all)
             try:
-                shapes = dlib_out_queue.get(block=first, timeout=3)
+                shapes = dlib_out_queue.get_nowait()
             except queues.Empty:
                 pass
 
-            for shape in shapes:
-                # Draw on our image, all the finded cordinate points (x,y)
-                for (x, y) in shape:
-                    cv2.circle(image, (x, y), 2, (0, 255, 0), -1)
-
+            # Feed the landmarks to eos
             try:
-                if shapes:
-                    eos_in_queue.put_nowait(shapes)
+                eos_in_queue.put_nowait(shapes)
             except queues.Full:
                 pass
 
+            # Get the mesh back
             try:
-                np_mesh = eos_out_queue.get(block=first, timeout=3)
+                np_mesh = eos_out_queue.get_nowait()
             except queues.Empty:
                 pass
 
-            if render_vertex and len(np_mesh) > 0 and not frame_count % 5:
-                try:
-                    if shapes:
-                        matplotlib_in_queue.put_nowait(np_mesh)
-                except queues.Full:
-                    pass
+            # Send the mesh for rendering, only if it exists
+            try:
+                if np_mesh is not None:
+                    matplotlib_in_queue.put_nowait(np_mesh)
+            except queues.Full:
+                pass
 
-                try:
-                    X = matplotlib_out_queue.get_nowait()
-                except queues.Empty:
-                    pass
-            first = False
+            # Get the render back
+            try:
+                rendered_mesh = matplotlib_out_queue.get_nowait()
+            except queues.Empty:
+                pass
 
+            # Draw on our image, all the finded cordinate points (x,y)
+            for shape in shapes:
+                for (x, y) in shape:
+                    cv2.circle(image, (x, y), 2, (0, 255, 0), -1)
+
+            # Make a second image to put the rendered mesh onto
             face_image = np.zeros_like(image)
-            face_image[:X.shape[0], :X.shape[1]] = X[:, :, :3]
+            face_image[:rendered_mesh.shape[0], :rendered_mesh.shape[1]] = rendered_mesh[:, :, :3]
 
+            # Juxtapose them
             image = np.hstack((image, face_image))
 
+            # Draw fps counter
             font = cv2.FONT_HERSHEY_SIMPLEX
             cv2.putText(image,
                         '{:.0f} fps'.format(1/(time.time()-last_time)),
                         (image_width, image_height-50),
-                        font, 2, (0, 0, 0), 2, cv2.LINE_AA)
+                        font, 1, (0, 0, 0), 2, cv2.LINE_AA)
             last_time = time.time()
-            # Show the image
+            
+            # Show the image with opencv
             cv2.imshow("Output", image)
 
             k = cv2.waitKey(5) & 0xFF
@@ -269,13 +287,26 @@ if __name__ == "__main__":
 
         cv2.destroyAllWindows()
     finally:
+        # Release all
         cap.release()
         exit_event.set()
-        print('exit_event set')
+        logging.debug('exit_event set')
         
         face_detector_process.join()
-        print('dlib joined')
+        logging.debug('dlib joined')
         eos_process.join()
-        print('eos joined')
+        logging.debug('eos joined')
         matplotlib_process.join()
-        print('all process joined')
+        logging.debug('all process joined')
+        for queue in [dlib_in_queue, dlib_out_queue, eos_in_queue,
+                            eos_out_queue, matplotlib_in_queue, matplotlib_out_queue, ]:
+            clear_queue(queue)
+        logging.debug('queues cleared')
+
+    
+
+
+if __name__ == "__main__":
+    freeze_support()
+    main()
+
